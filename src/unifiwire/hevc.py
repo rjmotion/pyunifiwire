@@ -60,9 +60,18 @@ class ParameterSets:
     def complete(self) -> bool:
         return bool(self.vps and self.sps and self.pps)
 
+    @property
+    def sets(self) -> tuple[bytes, ...]:
+        """The parameter-set NAL units, in the order a decoder wants them.
+
+        Mirrors `avc.ParameterSets.sets` so the media and RTSP layers can prepend
+        the sets to a keyframe without knowing which codec they hold.
+        """
+        return tuple(s for s in (self.vps, self.sps, self.pps) if s)
+
     def as_annex_b(self) -> bytes:
         start = b"\x00\x00\x00\x01"
-        return b"".join(start + s for s in (self.vps, self.sps, self.pps) if s)
+        return b"".join(start + s for s in self.sets)
 
 
 def video_packet(body: bytes) -> VideoPacket | None:
@@ -161,6 +170,26 @@ def parameter_sets(video_body: bytes) -> ParameterSets:
             return as_hvcc
     # The camera's own layout: skip the two-byte header, read 2-byte-prefixed NALs.
     return parse_length_prefixed_sets(video_body[2:], length_size=2)
+
+
+def parameter_sets_from_units(units: list[bytes], length_size: int = 4) -> ParameterSets:
+    """Collect VPS/SPS/PPS from already-split NAL units — the *in-band* case.
+
+    Mirrors `avc.parameter_sets_from_units`. HEVC on this wire does send a sequence
+    header, but a stream can also repeat the sets in band ahead of a keyframe, and
+    recovering them from a frame's units makes a late joiner robust either way.
+    """
+    found: dict[int, bytes] = {}
+    for unit in units:
+        kind = nal_type(unit)
+        if kind in (NAL_VPS, NAL_SPS, NAL_PPS) and kind not in found:
+            found[kind] = unit
+    return ParameterSets(
+        vps=found.get(NAL_VPS, b""),
+        sps=found.get(NAL_SPS, b""),
+        pps=found.get(NAL_PPS, b""),
+        length_size=length_size,
+    )
 
 
 def split_nalus(payload: bytes, length_size: int = 4) -> Iterator[bytes]:

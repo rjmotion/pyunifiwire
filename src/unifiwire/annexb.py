@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Final, Iterator
 
-from . import hevc
+from . import avc, hevc
 
 START_CODE: Final = b"\x00\x00\x01"
-VCL_MAX: Final = 31  # NAL types 0..31 are coded slices
+VCL_MAX: Final = 31  # HEVC NAL types 0..31 are coded slices
 
 
 def annex_b_units(data: bytes) -> Iterator[bytes]:
@@ -57,6 +57,40 @@ def frames(units: list[bytes]) -> Iterator[tuple[list[bytes], bool]]:
         pending.append(unit)
         if kind <= VCL_MAX:
             yield pending, hevc.is_irap(unit)
+            pending = []
+    if pending:
+        yield pending, False
+
+
+def build_avcc(sps: bytes, pps: bytes, length_size: int = 4) -> bytes:
+    """The smallest `avcC` record that carries one SPS, one PPS and the length size.
+
+    The mirror of `build_hvcc` for H.264. The three bytes after the SPS NAL header
+    are profile_idc / constraints / level_idc, and they are copied into the record
+    so a receiver reads a consistent profile.
+    """
+    if len(sps) < 4:
+        raise ValueError("SPS too short to describe a profile")
+    record = bytearray([1, sps[1], sps[2], sps[3], 0xFC | (length_size - 1), 0xE0 | 1])
+    record += len(sps).to_bytes(2, "big") + sps
+    record.append(1)
+    record += len(pps).to_bytes(2, "big") + pps
+    return bytes(record)
+
+
+AVC_VCL_RANGE: Final = range(1, 6)  # H.264 NAL types 1..5 are coded slices
+
+
+def avc_frames(units: list[bytes]) -> Iterator[tuple[list[bytes], bool]]:
+    """`frames`, for H.264: a one-byte NAL header, IDR (type 5) is the keyframe."""
+    pending: list[bytes] = []
+    for unit in units:
+        kind = avc.nal_type(unit)
+        if kind is None:
+            continue
+        pending.append(unit)
+        if kind in AVC_VCL_RANGE:
+            yield pending, kind == avc.NAL_IDR
             pending = []
     if pending:
         yield pending, False

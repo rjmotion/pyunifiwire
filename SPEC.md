@@ -269,6 +269,27 @@ The body is shaped like FLV's AVC packets: packet type, 24-bit composition time,
 then length-prefixed NAL units, with the sequence header carrying an `hvcC` record
 and arriving with `frameType 6`.
 
+The camera advertises `videoCodecs: [h264, h265, mjpg]` and encodes whichever a
+track is armed for, **including H.265 on one track and H.264 on another at the same
+time** — confirmed against the real G5 PTZ. `[MEASURED]`
+
+**The two codecs signal their configuration differently**, and this bites anyone who
+assumes they match:
+
+* **HEVC (codec id 8)** sends the parameter sets in a tag marked by **FLV frame type
+  6**, and sets the `AVCPacketType` byte to **1** even on that config tag. The record
+  is not a standard `hvcC` — the parameter sets are `[u16 length][NAL]` runs from
+  byte 2. So config is told apart by the frame type, never the packet-type byte.
+* **H.264 (codec id 7)** uses the **standard FLV convention**: a config tag is frame
+  type **1** (a keyframe) with the `AVCPacketType` byte **0** and a normal `avcC`
+  record at byte 5. Frames have `AVCPacketType` 1. There is no frame-type-6 tag.
+
+Both then carry the picture as length-prefixed NAL units (one-byte NAL header for
+H.264, two for HEVC). A parser must accept *either* signal — frame type 6 **or**
+`AVCPacketType` 0 — or it will silently miss one codec's parameter sets and be
+unable to describe the stream. `[MEASURED]`, both codecs, off a real camera and a
+clean re-serve decode.
+
 **Audio is AAC-LC, 16 kHz, mono**, regardless of the `withOpus` request in the
 settings. A receiver that assumes 44.1 kHz plays it at the wrong speed. `[MEASURED]`
 
