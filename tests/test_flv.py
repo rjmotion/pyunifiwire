@@ -84,3 +84,50 @@ def test_to_standard_flv_sets_conventional_flags() -> None:
     out = flv.to_standard_flv(tags)
     assert out[:3] == b"FLV"
     assert out[4] == 0x05
+
+
+# --- HEVC parameter-set extraction, both container shapes seen in the wild -------
+
+from unifiwire import annexb, hevc
+
+
+def _config_body(prefix: bytes, payload: bytes) -> bytes:
+    """A video sequence-header tag body: FLV byte, packet byte, then the payload."""
+    return prefix + payload
+
+
+def test_parameter_sets_read_a_standard_hvcc() -> None:
+    """What this library and most writers produce: byte1 = 0, hvcC from byte 5."""
+    hvcc = annexb.build_hvcc(bytes([0x40, 0x01, 0x0C]), bytes([0x42, 0x01, 0x01]), bytes([0x44, 0x01, 0xC0]))
+    body = bytes([0x68, 0x00, 0, 0, 0]) + hvcc
+    sets = hevc.parameter_sets(body)
+    assert sets.complete
+    assert hevc.nal_type(sets.vps) == hevc.NAL_VPS
+    assert sets.length_size == 4
+
+
+def test_parameter_sets_read_a_length_prefixed_config() -> None:
+    """What a real UVC camera sends: byte1 = 1, then 2-byte-length-prefixed NALs
+    from byte 2, and no hvcC fixed header at all."""
+    vps = bytes([0x40, 0x01]) + b"\x0c" * 22
+    sps = bytes([0x42, 0x01]) + b"\x60" * 40
+    pps = bytes([0x44, 0x01]) + b"\xe0" * 5
+    payload = b"".join(len(n).to_bytes(2, "big") + n for n in (vps, sps, pps))
+    body = bytes([0x68, 0x01]) + payload
+    sets = hevc.parameter_sets(body)
+    assert sets.complete, "the camera's own container must be understood, not just hvcC"
+    assert sets.vps == vps and sets.sps == sps and sets.pps == pps
+    assert sets.length_size == 4, "frames use 4-byte lengths even when config uses 2"
+
+
+def test_the_packet_type_byte_does_not_decide_config() -> None:
+    """The real camera sets byte1 to 1 on the sequence header too, so a reader that
+    keys on it (the AVC convention) misses the parameter sets."""
+    vps = bytes([0x40, 0x01, 0x0C])
+    sps = bytes([0x42, 0x01, 0x60])
+    pps = bytes([0x44, 0x01, 0xE0])
+    payload = b"".join(len(n).to_bytes(2, "big") + n for n in (vps, sps, pps))
+    body = bytes([0x68, 0x01]) + payload
+    packet = hevc.video_packet(body)
+    assert packet is not None and not packet.is_config, "byte1=1 reads as a frame"
+    assert hevc.parameter_sets(body).complete, "but the sets are still recovered"

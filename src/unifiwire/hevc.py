@@ -109,6 +109,60 @@ def parse_hvcc(record: bytes) -> ParameterSets:
     )
 
 
+def parse_length_prefixed_sets(
+    payload: bytes, length_size: int, frame_length_size: int = 4
+) -> ParameterSets:
+    """Pull parameter sets out of a run of length-prefixed NAL units.
+
+    Some cameras do not send a standard hvcC record. Instead the sequence header
+    carries the parameter sets as `[length][NAL]` in a row — the same shape an
+    hvcC array uses, but without the fixed configuration prefix. `length_size` is
+    how many bytes each NAL's length occupies here (2 in practice); the returned
+    `length_size` is the one the *frames* use, which is not necessarily the same.
+    """
+    found: dict[int, bytes] = {}
+    cursor = 0
+    while cursor + length_size <= len(payload):
+        size = int.from_bytes(payload[cursor : cursor + length_size], "big")
+        cursor += length_size
+        unit = payload[cursor : cursor + size]
+        cursor += size
+        if size <= 0 or len(unit) != size:
+            break
+        kind = nal_type(unit)
+        if kind in (NAL_VPS, NAL_SPS, NAL_PPS) and kind not in found:
+            found[kind] = unit
+    return ParameterSets(
+        vps=found.get(NAL_VPS, b""),
+        sps=found.get(NAL_SPS, b""),
+        pps=found.get(NAL_PPS, b""),
+        length_size=frame_length_size,
+    )
+
+
+def parameter_sets(video_body: bytes) -> ParameterSets:
+    """Read the parameter sets out of a video sequence-header tag body.
+
+    Handles both shapes seen in the wild:
+
+    * a standard `hvcC` record, at the FLV/AVC payload offset (byte 5 on) — what
+      most writers, and this library's own, produce;
+    * a bare run of 2-byte length-prefixed NAL units starting at byte 2, which is
+      what a real UVC camera sends. It also sets `byte 1` to 1 rather than the
+      standard 0, so config cannot be told apart by that byte — the caller keys on
+      the FLV frame type instead.
+
+    Whichever yields a complete set wins; an incomplete first attempt falls
+    through to the second rather than being trusted.
+    """
+    if len(video_body) > 5:
+        as_hvcc = parse_hvcc(video_body[5:])
+        if as_hvcc.complete:
+            return as_hvcc
+    # The camera's own layout: skip the two-byte header, read 2-byte-prefixed NALs.
+    return parse_length_prefixed_sets(video_body[2:], length_size=2)
+
+
 def split_nalus(payload: bytes, length_size: int = 4) -> Iterator[bytes]:
     """Walk length-prefixed NAL units, stopping cleanly on a truncated tail."""
     cursor = 0
